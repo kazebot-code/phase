@@ -26075,6 +26075,27 @@ pub fn extract_target_filter_from_effect(effect: &Effect) -> Option<&TargetFilte
     if matches!(effect, Effect::UnattachAll { .. }) {
         return None;
     }
+    // CR 115.1 + CR 115.1a + CR 119.5: "each player's life total becomes …"
+    // (Worldfire, Repay in Kind, Biorhythm) is a NON-targeted mass effect. The
+    // printed text contains no "target [something]" phrase, so by CR 115.1a the
+    // spell declares no targets at all; the `AllPlayers` filter is the
+    // RESOLUTION-time population that `resolve_set_life_total` iterates in
+    // APNAP order, never a chosen target. Surfacing it here would mint a
+    // required target slot whose legal set is always empty (`find_legal_targets`
+    // enumerates players only for `Player`/`Any`/typed-player shapes, never
+    // `AllPlayers`), so every such spell/trigger is rejected at announcement
+    // with "No legal targets available" (issue #10455). Mirrors the
+    // Sacrifice/UnattachAll carve-outs above and the `None` its mass siblings
+    // return from `Effect::target_filter`.
+    if matches!(
+        effect,
+        Effect::SetLifeTotal {
+            target: TargetFilter::AllPlayers,
+            ..
+        }
+    ) {
+        return None;
+    }
     // CR 115.1 + Whitemane Lion ruling: A `Bounce` whose Oracle text omitted
     // the word "target" ("return a creature you control to its owner's hand")
     // is NOT a targeted effect — the controller chooses an eligible permanent
@@ -26230,6 +26251,72 @@ pub fn extract_target_filter_from_effect(effect: &Effect) -> Option<&TargetFilte
         return None;
     }
     effect.target_filter().filter(|t| !t.is_context_ref())
+}
+
+#[cfg(test)]
+mod set_life_total_slot_authority_tests {
+    use super::*;
+
+    fn set_life_total(target: TargetFilter) -> Effect {
+        Effect::SetLifeTotal {
+            target,
+            amount: QuantityExpr::Fixed { value: 1 },
+        }
+    }
+
+    /// CR 115.1a + CR 119.5 (issue #10455): "each player's life total becomes
+    /// …" (Worldfire, Repay in Kind, Biorhythm) contains no "target
+    /// [something]" phrase, so it declares NO targets. The `AllPlayers` filter
+    /// is the resolution-time population `resolve_set_life_total` iterates in
+    /// APNAP order; surfacing it would mint a required slot whose legal set is
+    /// always empty and reject the spell at announcement.
+    #[test]
+    fn all_players_set_life_total_mints_no_slot() {
+        assert!(
+            extract_target_filter_from_effect(&set_life_total(TargetFilter::AllPlayers)).is_none(),
+            "each player's life total … declares no target slot"
+        );
+    }
+
+    /// CR 115.1: the genuinely targeted forms still announce their slot — the
+    /// carve-out must not swallow them. "target player's life total …",
+    /// "target opponent's life total …" (player axis, empty type list), and
+    /// "target creature's …" (object axis).
+    #[test]
+    fn targeted_set_life_total_forms_keep_their_slot() {
+        let player = TargetFilter::Player;
+        assert_eq!(
+            extract_target_filter_from_effect(&set_life_total(player.clone())),
+            Some(&player)
+        );
+
+        let opponent = TargetFilter::Typed(TypedFilter {
+            type_filters: Vec::new(),
+            controller: Some(ControllerRef::Opponent),
+            properties: Vec::new(),
+        });
+        assert_eq!(
+            extract_target_filter_from_effect(&set_life_total(opponent.clone())),
+            Some(&opponent)
+        );
+
+        let creature = TargetFilter::Typed(TypedFilter::creature());
+        assert_eq!(
+            extract_target_filter_from_effect(&set_life_total(creature.clone())),
+            Some(&creature)
+        );
+    }
+
+    /// CR 115.1: "your life total becomes …" (Oketra's Last Mercy) is a
+    /// context ref, not a target — it was and stays slot-free via the final
+    /// `is_context_ref` filter. Pins the carve-out boundary: only the
+    /// `AllPlayers` scope changes behaviour, not the single-player forms.
+    #[test]
+    fn controller_set_life_total_is_a_context_ref_not_a_slot() {
+        assert!(
+            extract_target_filter_from_effect(&set_life_total(TargetFilter::Controller)).is_none()
+        );
+    }
 }
 
 pub fn move_counter_stack_target_filters<'a>(
